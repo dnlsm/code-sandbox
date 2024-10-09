@@ -1,0 +1,290 @@
+<script type="text/javascript">
+window.onload = main
+
+function main(){
+	try{
+		main_webgpu()
+		.catch((err) => alert(err))
+	}
+	catch(err){ alert(err) }
+}
+
+async function main_webgpu(){
+	const h= window.screen.height, w= window.screen.width;
+	//const h=2048, w=2048;
+
+
+// ## Initializing webGPU
+
+	if(!navigator.gpu) throw new Error('[WebGPU] WebGPU not supported')
+	const adapter = await navigator.gpu.requestAdapter()
+	if(!adapter) throw new Error('[WebGPU] No adapter available')
+
+	const device = await adapter.requestDevice()
+
+// ## Initializing Params
+	const canvas = document.querySelector("canvas"),
+		ctx = canvas.getContext("2d")
+	const BUFFER_SIZE = w*h*4;
+
+	const cw = w/2, ch = h/2;
+
+	canvas.height = h
+	canvas.width = w
+
+	const shaderSrc = 
+`
+@group(0) @binding(0) var<storage, read_write> frame: array<u32>;
+@group(0) @binding(1) var<uniform> ftime: f32;
+
+	@compute @workgroup_size(1) fn cs(
+		@builtin(workgroup_id) id: vec3u,
+		@builtin(local_invocation_id) local: vec3u
+	){
+		//let x: u32 = id.x % ${w};
+		//let y: u32 = u32(floor(f32(id.x/${w})));
+		let index: u32 = id.x + ${w}*id.y;
+		let x: f32 = f32(id.x);
+		let y: f32 = f32(id.y);
+		let h: f32 = f32(${h});
+		let w: f32 = f32(${w});
+		let cw: f32 = w / 2;
+		let ch: f32 = h / 2;
+
+		frame[index] = pack4xU8(
+			vec4u(
+				u32((1+sin(0.5 * sqrt(pow(cw - x, 2.0) + pow(ch - y, 2.0))+ (2*3.141592*ftime)))/2 * 255),
+				0,//u32(x % 256),
+				0,//u32(y % 256),
+				u32(( sqrt(pow(w-x,2.0)+pow(h-y,2.0))/sqrt(pow(w,2.0)+pow(h,2.0))*2*256 ) % 256)
+			)
+		); 
+
+/**********************************************
+ 	This segment for writing x,y,z,w values 
+from diferent invokes is slow in performance
+due to concurrency on writing at same address!
+
+
+	The atomic approach required for this to
+work is not fast enough than actually calculate
+all components in the same invoke
+
+	Maybe in another rendering scenario, this
+technique could be useful
+
+Obs. frame must be type: array<atomic<u32>>
+and workgroup_size(4)
+
+***********************************************/
+/************** BEGIN OF SNIPPET ***************
+
+	var data: vec4<u32> = vec4u(0, 0, 0, 0);
+	var mask: vec4<u32>;
+
+	if(local.x == 0){
+		data.x = u32((1+sin(0.5 * sqrt(pow(cw - x, 2.0) + pow(ch - y, 2.0)) + (2*3.141592*ftime)))/2*255);
+		mask= vec4u(0,255,255,255); 
+	}
+	else if(local.x == 1){
+		data.y = u32(x % 256);
+		mask = vec4u(255,0,255,255);
+	}
+	else if(local.x == 2){
+		data.z = u32(y % 256);
+		mask = vec4u(255,255,0,255);
+	}
+	else if(local.x == 3){
+		data.w = u32(( sqrt(pow(w-x,2)+pow(h-y,2.0))/sqrt(pow(w,2.0)+pow(h,2.0))*2*256 ) % 256);
+		mask = vec4u(255,255,255,0);
+	}
+	
+// ***** Write in memory: Alternative I *****
+	// let d: u32 = atomicLoad(&frame[index]);
+	// atomicXor(&frame[index], (pack4xU8(data) ^ d) & pack4xU8(mask));
+
+// ***** Write in memory: Altenative II *****
+	// atomicAnd(&frame[index], pack4xU8(mask));
+	// atomicAdd(&frame[index], pack4xU8(data));
+
+**************** END OF SNIPPET ***************/
+
+	}
+`
+
+	console.log(shaderSrc)
+
+	const shaderModule = device.createShaderModule({
+		code: shaderSrc,
+	})
+
+// ## Output Buffer
+	const output = new Uint8ClampedArray(h*w*4)
+
+	const outputBuffer = device.createBuffer({
+		size: BUFFER_SIZE,
+		usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+	})
+	const stagingBuffer = device.createBuffer({
+		size: BUFFER_SIZE,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+	})
+
+	let timeArray = new Float32Array([performance.now()])
+	const uniformBuffer = device.createBuffer({
+		size: timeArray.byteLength,
+		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+		mappedAtCreation: false
+	})
+
+
+
+// ## Bindgroup
+	const bindGroupLayout = device.createBindGroupLayout({
+		entries: [
+			{
+				binding:0,
+				visibility: GPUShaderStage.COMPUTE,
+				buffer: {
+					type: "storage"
+				}
+			},
+
+			{
+				binding:1,
+				visibility: GPUShaderStage.COMPUTE,
+				buffer: {
+					type: "uniform"
+				}
+			}
+		]
+	})
+
+	const bindGroup = device.createBindGroup({
+		layout: bindGroupLayout,
+		entries: [
+			{
+				binding: 0,
+				resource: {
+					buffer: outputBuffer
+				}
+			},
+			{
+				binding: 1,
+				resource: {
+					buffer: uniformBuffer
+				}
+			},
+		]
+	})
+// ## Compute Pipeline
+	const computePipeline = device.createComputePipeline({
+		layout: device.createPipelineLayout({
+			bindGroupLayouts: [bindGroupLayout]
+		}),
+		compute: {
+			module: shaderModule,
+			entryPoint: "cs"
+		}
+	})
+
+// ## Encoders
+	let count = 0, initTime = performance.now(), ftrigger = 20;
+
+	async function draw(timestamp){
+		timeArray[0] = timestamp / 1000
+
+		device.queue.writeBuffer(uniformBuffer,0, timeArray, 0)
+		const commandEncoder = device.createCommandEncoder({ label: "compute command encoder"})
+
+		const passEncoder = commandEncoder.beginComputePass()
+
+		passEncoder.setPipeline(computePipeline);
+		passEncoder.setBindGroup(0, bindGroup);
+		passEncoder.dispatchWorkgroups(w, h);
+		passEncoder.end();
+
+		commandEncoder.copyBufferToBuffer(outputBuffer,0,stagingBuffer,0, BUFFER_SIZE)
+
+		let commandBuffer = commandEncoder.finish()
+		
+
+		performance.mark("beforeSubmit")
+		device.queue.submit([commandBuffer])
+
+		device.queue.onSubmittedWorkDone().then(async () => {
+		
+			performance.mark("beginMap")
+			await stagingBuffer.mapAsync(GPUMapMode.READ, 0, BUFFER_SIZE)
+
+
+
+			performance.mark("beginMappedRange")
+			let mappedRange = stagingBuffer.getMappedRange()
+			performance.mark("beginUint8ArrayClamp")
+			const result = new Uint8ClampedArray(mappedRange)
+
+			performance.mark("beginImageData")
+			let image = new ImageData(result, w, h)
+			performance.mark("beginPutImage")
+			ctx.putImageData(image, 0, 0)
+
+			performance.mark("beginUnmap")
+			stagingBuffer.unmap();
+
+			performance.mark("afterUnmap")
+
+			performance.measure("Frame Rendering", "beforeSubmit", "afterUnmap")
+			performance.measure("GPU Time", "beforeSubmit", "beginMap")
+			performance.measure("DataMap/CanvasDraw", "beginMap", "afterUnmap")
+			performance.measure("AsyncMap", "beginMap", "beginMappedRange")
+			performance.measure("MappedRange", "beginMappedRange", "beginUint8ArrayClamp")
+			performance.measure("ArrayClamp", "beginUint8ArrayClamp", "beginImageData")
+			performance.measure("ImageData", "beginImageData", "beginPutImage")
+			performance.measure("PutImage", "beginPutImage", "beginUnmap")
+			count++;
+			if(count >= ftrigger){
+				let fps = count/((performance.now()-initTime)/1000);
+				document.querySelector('#fps').innerText = `${Math.round(fps*1000)/1000} FPS`
+				count = 0;
+				ftrigger = Number.parseInt(fps/2)
+				initTime = performance.now()
+			}
+
+			window.requestAnimationFrame(draw)
+
+		})
+
+		//console.log(result)
+
+
+	}
+
+
+	window.requestAnimationFrame(draw)
+	//draw(1)
+}
+
+
+</script>
+
+<canvas></canvas>
+<ul>
+	<li>WebGPU @compute</li>
+<li><span id="fps">FPS</span></li>
+</ul>
+
+<style type="text/css">
+	body {
+		margin: 0;
+	}
+
+	ul {
+		position: absolute;
+		right:0;
+		bottom: 0;
+		padding-right: 1em;
+		background: rgba(0,0,0,0.5);
+		color: white;
+	}
+</style>

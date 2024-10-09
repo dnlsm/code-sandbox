@@ -1,0 +1,92 @@
+<script type="text/javascript">
+	window.onload = main
+
+const h= window.screen.height, w= window.screen.width;
+let arr = new Uint8ClampedArray(w*h*4)
+let input = {
+	mouse: 'none'
+}
+
+let count = 0, initTime = performance.now(), ftrigger=20;
+
+
+async function draw(ctx){
+	const time = performance.now()
+	const timef = time/1000
+	const ysize = h*4
+
+	const cw = w/2; ch = h/2
+	let i;
+	for(i = 0; i < w*h; i++){
+		let x = (i%w)
+		let y = (Math.floor(i/w))
+
+		let j = i*4
+		arr[j] = (1+Math.sin(0.5* Math.sqrt(Math.pow(cw - x, 2) + Math.pow(ch - y, 2)) + (2*Math.PI*timef)))/2*255
+		arr[j+1] = (x)%256
+		arr[j+2] = (y)%256
+		arr[j+3] = Math.sqrt(Math.pow(w-x,2)+Math.pow(h-y,2))/Math.sqrt(Math.pow(w,2)+Math.pow(h,2))*2*256%256
+	}
+
+	console.log(arr)
+	let data = new ImageData(arr, w, h)
+
+	ctx.putImageData(data, 0, 0)
+	//let image = await window.createImageBitmap(data)
+	//ctx.transferFromImageBitmap(image)
+
+	//window.requestAnimationFrame(() => {draw(ctx)})
+	count++;
+	if(count >= ftrigger){
+		let fps = count/((performance.now()-initTime)/1000);
+		document.querySelector('#fps').innerText = `${Math.round(fps*1000)/1000} FPS`
+		count = 0;
+		ftrigger = Number.parseInt(fps/2)
+		initTime = performance.now()
+	}
+	setTimeout(draw, 0, ctx)
+}
+
+let animationFrame;
+
+async function main(){
+
+	let canvas = document.querySelector("#myCanvas")
+	canvas.width = w;
+	canvas.height = h;
+
+	canvas.addEventListener('mousedown', () => {
+		input.mouse = 'down'
+
+	})
+	canvas.addEventListener('mouseup', () => {
+		input.mouse = 'none'
+	})
+
+	let ctx = canvas.getContext("2d")
+
+	//animationFrame = window.requestAnimationFrame(() => { draw(ctx) })
+	setTimeout(draw, 0, ctx)
+}
+</script>
+
+<canvas id="myCanvas"></canvas>
+<ul style="display: inline-block">
+	<li>JS [ Array ]</li>
+<li><span id="fps">FPS</span></li>
+
+</ul>
+<style type="text/css">
+	body {
+		margin: 0;
+	}
+
+	ul {
+		position: absolute;
+		right:0;
+		top: 0;
+		padding-right: 1em;
+		background: rgba(0,0,0,0.5);
+		color: white;
+	}
+</style>
