@@ -37,8 +37,8 @@ async function main_webgpu(){
 @group(0) @binding(0) var<storage, read_write> frame: array<u32>;
 @group(0) @binding(1) var<uniform> ftime: f32;
 
-	@compute @workgroup_size(1) fn cs(
-		@builtin(workgroup_id) id: vec3u,
+	@compute @workgroup_size(8, 8) fn cs(
+		@builtin(global_invocation_id) id: vec3u,
 		@builtin(local_invocation_id) local: vec3u
 	){
 		//let x: u32 = id.x % ${w};
@@ -50,6 +50,10 @@ async function main_webgpu(){
 		let w: f32 = f32(${w});
 		let cw: f32 = w / 2;
 		let ch: f32 = h / 2;
+
+		if(x >= f32(${w}) || y >= f32(${h})){
+			return;
+		}
 
 		frame[index] = pack4xU8(
 			vec4u(
@@ -201,7 +205,7 @@ and workgroup_size(4)
 
 		passEncoder.setPipeline(computePipeline);
 		passEncoder.setBindGroup(0, bindGroup);
-		passEncoder.dispatchWorkgroups(w, h);
+		passEncoder.dispatchWorkgroups(Math.ceil(w/8), Math.ceil(h/8));
 		passEncoder.end();
 
 		commandEncoder.copyBufferToBuffer(outputBuffer,0,stagingBuffer,0, BUFFER_SIZE)
