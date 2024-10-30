@@ -1,0 +1,510 @@
+<!-- <script id="shader-compute" type="text/wgsl" src="shaders/shader.wgsl"></script> -->
+<script type="text/javascript">
+window.onload = main
+
+function main(){
+	try{
+		main_webgpu()
+		.catch((err) => alert(err))
+	}
+	catch(err){ alert(err) }
+}
+
+async function main_webgpu(){
+	const h= window.screen.height, w= window.screen.width;
+	const Resolution = [w, h, 1],
+	CameraPosition = [0.0, 0.1, 0],
+	CameraRotation = [0.0, 0.0],
+	CameraMovement = [0.0, 0.0]
+	
+	document.querySelector("#resolution").innerText = ` ${w} x ${h}`
+
+// ## Initializing webGPU
+
+	if(!navigator.gpu) throw new Error('[WebGPU] WebGPU not supported')
+	const adapter = await navigator.gpu.requestAdapter()
+	if(!adapter) throw new Error('[WebGPU] No adapter available')
+
+	const device = await adapter.requestDevice()
+
+// ## Initializing Params
+	const canvas = document.querySelector("canvas"),
+		ctx = canvas.getContext("2d"),
+		body = document.querySelector("body")
+
+	canvas.height = h
+	canvas.width = w
+
+
+	const fullscreenElement = body
+	let eventsAttached = false;
+	canvas.addEventListener('click',async () => {
+		if(!document.pointerLockElement){
+			await canvas.requestPointerLock();
+
+		}
+	})
+	document.addEventListener('pointerlockchange',async ()=> {
+		if(document.pointerLockElement === canvas){
+			if(!eventsAttached){
+				document.addEventListener('keydown', keyUpdate)
+				document.addEventListener('keyup', keyUpdate)
+				document.addEventListener('keypress', keyUpdate)
+				document.addEventListener('pointermove', pointerUpdate)
+				eventsAttached = true;
+			}
+			if(document.fullscreenElement !== fullscreenElement){
+				await fullscreenElement.requestFullscreen();
+			}
+		}
+		else {
+			if(eventsAttached){
+				document.removeEventListener('keydown', keyUpdate)
+				document.removeEventListener('keyup', keyUpdate)
+				document.removeEventListener('keypress', keyUpdate)
+				document.removeEventListener('pointermove', pointerUpdate)
+
+				eventsAttached = false;
+			}
+			if(document.fullscreenElement === fullscreenElement){
+				await document.exitFullscreen()
+			}
+		}
+	})
+
+
+
+/***************** SHADER SETUP ********************************
+***************************************************************/
+
+	const shaderSrc = `
+alias Color = vec4u;
+alias RGBColor = vec3u;
+
+struct Uniform {
+	resolution: vec3f,
+	time: f32,
+	position: vec3f,
+	yz: f32,
+	xz: f32,
+	forward: f32,
+	lateral: f32
+}
+
+alias Shader_Stage_Uniform = Uniform;
+@group(0) @binding(0) var<storage, read_write> frame: array<u32>;
+@group(1) @binding(0) var<uniform> u: Uniform;
+
+
+	@compute @workgroup_size(8, 8) fn cs_render(
+		@builtin(global_invocation_id) id: vec3u,
+		@builtin(local_invocation_id) local: vec3u
+	){
+		let position = vec2f(f32(id.x), u.resolution.y - f32(id.y) -1);
+
+		if(position.x >= u.resolution.x || position.y >= u.resolution.y){
+			return;
+		}
+
+		let index: u32 = id.x + u32(u.resolution.x)*id.y;
+		frame[index] = pack4xU8(colorPixel(position));
+		//frame[index] = pack4xU8(vec4u(255,0,255,255));
+
+	}
+
+	fn colorPixel(xy: vec2f) -> Color {
+		var c: Color;
+		c = raymarch(xy);
+		//if(xy.x > u.xy){ c = vec4u(255,0,0,255); }
+		//if(xy.x % 50 == 49 || xy.y % 50 ==49){ c = vec4u(255,0,0,255); }
+		return c;
+	}
+	struct DistanceC {
+		distance: f32,
+		color: RGBColor
+	}
+
+	fn raymarch(position: vec2f) -> Color {
+		var color: RGBColor = vec3u(255,255,255);
+		let uv: vec2f = (2*position - u.resolution.xy)/ u.resolution.y;
+
+		let xz = mat3x3<f32>(
+			cos(u.xz),0.0,-sin(u.xz),
+			0.0, 1.0, 0.0,
+			sin(u.xz), 0.0, cos(u.xz),
+
+		);
+		let yz = mat3x3<f32>(
+			1.0, 0.0, 0.0,
+			0.0, cos(u.yz),-sin(u.yz),
+			0.0, sin(u.yz),cos(u.yz)
+		);
+		let ro = u.position;
+		let rd = normalize(xz*yz*vec3f(uv,1.0));
+
+		var t: f32 = 0;
+		var cz: u32 = 0;
+		var lastD: f32 = 0;
+		var incCount: u32 = 0;
+		var iteration: u32 = 0;
+		loop {
+			iteration++;
+			var p: vec3f = ro + (t * rd);
+			let d = map(p);
+			t += d.distance;
+
+			if(d.distance < 0.0001) {
+				//color = d.color;
+				//color = vec3u(vec3f(d.color)*(fract(t)+1)/2);
+				color = vec3u((0.7*vec3f(255,255,255)*normal(p) + 0.3*vec3f(d.color)));
+				break;
+			}
+
+			if( t>= 100. || iteration >= 300){
+				color = vec3(0, 143, 17);
+				break;
+			}
+		}
+
+		//color = vec3u(color*u32(255*t/100));
+		//color = clamp(color, vec3u(0,0,0), vec3u(255, 255, 255));
+		return vec4u(color, 255);
+	}
+	fn normal(p: vec3f) -> vec3f {
+		let d = map(p).distance;
+		let e = vec2(0.0001,0.0);
+		return normalize(d -vec3f(
+			map(p - e.xyy).distance,
+			map(p - e.yxy).distance,
+			map(p - e.yyx).distance
+		));
+
+	}
+
+	fn map(p: vec3f)-> DistanceC {
+		let center = vec3f(0.2*sin(2.0*u.time),0.05, cos(0.5*u.time)*0.9);
+		let radius = 0.1;
+		var d: DistanceC;
+		d.distance = min(min((length(p- center) - radius), p.y), (length(p- vec3f(1,0,0)) - 0.01));
+
+		if(d.distance == p.y){
+			if(fract(p.x)> 0.98 || fract(p.z)> 0.98){
+				d.color = vec3u(100, 100, 100);
+			}
+			else{
+				d.color = vec3u(200, 200, 200);
+			}
+		}else{
+
+			d.color = vec3u(255, 0, 0);
+		}
+
+		return d;
+	}
+
+	fn modd(a: f32, b: f32) -> f32{
+		return sign(a)*(abs(a) % b);
+	}
+
+
+`
+
+	//console.log(shaderSrc)
+
+	const shaderModule = device.createShaderModule({
+		code: shaderSrc,
+	})
+
+
+/***************** BUFFER SETUP ********************************
+***************************************************************/
+	const OUTPUT_BUFFER_SIZE = w*h*4;
+
+	const output = new Uint8ClampedArray(h*w*4)
+
+	const outputBuffer = device.createBuffer({
+		size: OUTPUT_BUFFER_SIZE,
+		usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+	})
+	const stagingBuffer = device.createBuffer({
+		size: OUTPUT_BUFFER_SIZE,
+		usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+	})
+
+	let uniformArray = new Float32Array([
+		...Resolution,
+		performance.now()/1000,
+		...CameraPosition,
+		...CameraRotation,
+		...CameraMovement])
+	const uniformBuffer = device.createBuffer({
+		label: "Uniform Data Buffer",
+		size: Math.max(uniformArray.byteLength, 64),
+		usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+		mappedAtCreation: false
+	})
+
+
+/***************** USER INPUT HANDLERS *************************
+***************************************************************/
+	let keys = { }
+	function pointerUpdate(e){
+		let { clientX, clientY, movementX, movementY } = e
+			//console.log(clientX, clientY)
+			//console.log(movementX, movementY)
+
+			let x = 0 
+			let y = 0
+			let z = 1
+			let yz = uniformArray[7] 
+			let xz = uniformArray[8] 
+
+			yz -= 3*movementY/1000;
+			xz += 3*movementX/1000;
+			uniformArray[7] = yz 
+			uniformArray[8] = xz 
+
+	}
+	function keyUpdate(e){
+		if(e.type === 'keydown'){
+			e.preventDefault();
+		}
+		
+		switch(e.type) {
+			case 'keydown':
+				keys[e.code] = 1;
+				break;
+			case 'keyup':
+				keys[e.code] = undefined;
+				break;
+
+		}
+		//console.log(keys)
+	}
+
+/***************** BINDGROUPS SETUP ****************************
+***************************************************************/
+
+// ## Bindgroup
+	const bindGroup0Layout = device.createBindGroupLayout({
+		entries: [
+			{
+				binding:0,
+				visibility: GPUShaderStage.COMPUTE,
+				buffer: {
+					type: "storage"
+				}
+			}
+		]
+	})
+
+	const bindGroup0 = device.createBindGroup({
+		label:'Group 0',
+		layout: bindGroup0Layout,
+		entries: [
+			{
+				binding: 0,
+				resource: {
+					buffer: outputBuffer
+				}
+			}
+		]
+	})
+	const bindGroup1Layout = device.createBindGroupLayout({
+		entries: [
+			{
+				binding:0,
+				visibility: GPUShaderStage.COMPUTE,
+				buffer: {
+					type: "uniform"
+				}
+			}
+		]
+	})
+
+	const bindGroup1 = device.createBindGroup({
+		label:'Group 1',
+		layout: bindGroup1Layout,
+		entries: [
+			{
+				binding: 0,
+				resource: {
+					buffer: uniformBuffer
+				}
+			}
+		]
+	})
+
+
+/***************** PIPELINE SETUP ******************************
+***************************************************************/
+
+// ## Compute Pipeline
+	const computePipeline = device.createComputePipeline({
+		layout: device.createPipelineLayout({
+			bindGroupLayouts: [bindGroup0Layout, bindGroup1Layout]
+		}),
+		compute: {
+			module: shaderModule,
+			entryPoint: "cs_render"
+		}
+	})
+
+
+
+/***************** RUN SHADER PIPELINE *************************
+***************************************************************/
+
+	let count = 0, initTime = performance.now(), ftrigger = 20;
+	async function draw(timestamp){
+
+		uniformArray[3] = timestamp / 1000;
+
+		if(Object.values(keys).some(e=> e)){
+			let forwardDirection = [0,0,1]
+			let lateralDirection = [0,0,1]
+
+
+			let yz = -uniformArray[7] 
+			let xz = -uniformArray[8] 
+			{
+
+				let z = forwardDirection[2]
+				let y = forwardDirection[1]
+				forwardDirection[1] = (y*Math.cos(yz) -z*Math.sin(yz))
+				forwardDirection[2] = (y*Math.sin(yz) +z*Math.cos(yz))
+
+				let x = forwardDirection[0]
+				z = forwardDirection[2]
+				forwardDirection[0] = (x*Math.cos(xz) -z*Math.sin(xz))
+				forwardDirection[2] = (x*Math.sin(xz) +z*Math.cos(xz))
+			}
+			{
+
+				let x = lateralDirection[0]
+				let z = lateralDirection[2]
+				lateralDirection[0] = (x*Math.cos(xz-(Math.PI/2)) -z*Math.sin(xz-(Math.PI/2)))
+				lateralDirection[2] = (x*Math.sin(xz-(Math.PI/2)) +z*Math.cos(xz-(Math.PI/2)))
+			}
+
+
+			let speedFactor = 0.01;
+			if(keys.ShiftLeft){
+				speedFactor *= 5;
+			}
+			if (keys.KeyW){
+				uniformArray[4] += speedFactor*forwardDirection[0];
+				uniformArray[5] += speedFactor*forwardDirection[1];
+				uniformArray[6] += speedFactor*forwardDirection[2];
+			}if (keys.KeyS){
+				uniformArray[4] -= speedFactor*forwardDirection[0];
+				uniformArray[5] -= speedFactor*forwardDirection[1];
+				uniformArray[6] -= speedFactor*forwardDirection[2];
+			}if (keys.KeyD){
+				uniformArray[4] += speedFactor*lateralDirection[0];
+				uniformArray[5] += speedFactor*lateralDirection[1];
+				uniformArray[6] += speedFactor*lateralDirection[2];
+			}if (keys.KeyA){
+				uniformArray[4] -= speedFactor*lateralDirection[0];
+				uniformArray[5] -= speedFactor*lateralDirection[1];
+				uniformArray[6] -= speedFactor*lateralDirection[2];
+			}
+		}
+		////console.log(uniformArray)
+		device.queue.writeBuffer(uniformBuffer,0, uniformArray, 0)
+		const commandEncoder = device.createCommandEncoder({ label: "compute command encoder"})
+
+		const passEncoder = commandEncoder.beginComputePass()
+
+		passEncoder.setPipeline(computePipeline);
+		passEncoder.setBindGroup(0, bindGroup0);
+		passEncoder.setBindGroup(1, bindGroup1);
+		passEncoder.dispatchWorkgroups(Math.ceil(w/8), Math.ceil(h/8));
+		passEncoder.end();
+
+		commandEncoder.copyBufferToBuffer(outputBuffer,0,stagingBuffer,0, OUTPUT_BUFFER_SIZE)
+
+		let commandBuffer = commandEncoder.finish()
+		
+
+		performance.mark("beforeSubmit")
+		device.queue.submit([commandBuffer])
+
+		device.queue.onSubmittedWorkDone().then(async () => {
+		
+			performance.mark("beginMap")
+			await stagingBuffer.mapAsync(GPUMapMode.READ, 0, OUTPUT_BUFFER_SIZE)
+
+
+
+			performance.mark("beginMappedRange")
+			let mappedRange = stagingBuffer.getMappedRange()
+			performance.mark("beginUint8ArrayClamp")
+			const result = new Uint8ClampedArray(mappedRange)
+
+			performance.mark("beginImageData")
+			let image = new ImageData(result, w, h)
+			performance.mark("beginPutImage")
+			ctx.putImageData(image, 0, 0)
+
+			performance.mark("beginUnmap")
+			stagingBuffer.unmap();
+
+			performance.mark("afterUnmap")
+
+			performance.measure("Frame Rendering", "beforeSubmit", "afterUnmap")
+			performance.measure("GPU Time", "beforeSubmit", "beginMap")
+			performance.measure("DataMap/CanvasDraw", "beginMap", "afterUnmap")
+			performance.measure("AsyncMap", "beginMap", "beginMappedRange")
+			performance.measure("MappedRange", "beginMappedRange", "beginUint8ArrayClamp")
+			performance.measure("ArrayClamp", "beginUint8ArrayClamp", "beginImageData")
+			performance.measure("ImageData", "beginImageData", "beginPutImage")
+			performance.measure("PutImage", "beginPutImage", "beginUnmap")
+			count++;
+			if(count >= ftrigger){
+				let fps = count/((performance.now()-initTime)/1000);
+				document.querySelector('#fps').innerText = `${Math.round(fps*1000)/1000} FPS`
+				count = 0;
+				ftrigger = Number.parseInt(fps/2)
+				initTime = performance.now()
+			}
+			window.requestAnimationFrame(draw)
+
+		})
+
+		////console.log(result)
+
+
+	}
+
+
+	window.requestAnimationFrame(draw)
+	//draw(1)
+}
+
+
+</script>
+
+<canvas></canvas>
+<ul id="params">
+	<li>WebGPU @compute Raymarching</li>
+<li><span id="fps">FPS</span></li>
+<li><span id="resolution">w x h</span></li>
+</ul>
+
+<style type="text/css">
+	body {
+		margin: 0;
+		background: black;
+		overflow: auto;
+	}
+
+	ul#params {
+		position: absolute;
+		right:0;
+		bottom: 0;
+		padding-right: 1em;
+		background: rgba(0,0,0,0.5);
+		color: white;
+	}
+</style>
